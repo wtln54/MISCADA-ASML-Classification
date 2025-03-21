@@ -1,0 +1,356 @@
+---
+title: "predict"
+date: "2025-03-19"
+output: html_document
+---
+
+```{r}
+data = read.csv("D:/desktop/data/hotel/heart_failure.csv")
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(janitor)
+```
+
+
+## descriptive statistic
+
+```{r}
+dim(data)
+#data = data|> select(-reservation_status_date,-reservation_status,-company,-country)
+```
+
+```{r}
+table(data$fatal_mi)
+data$fatal_mi = as.factor(data$fatal_mi)
+```
+
+```{r}
+library(ggplot2)
+library(scales)  
+
+ggplot(data, aes(x = fatal_mi, fill = fatal_mi)) +
+  geom_bar(alpha = 0.7) +  
+  labs(
+    title = "Distribution of Fatal Myocardial Infarction (Fatal MI)",
+    x = "Fatal MI Status",
+    y = "Count",
+    fill = "Fatal MI"
+  ) +
+  scale_x_discrete(labels = c("No" = "0", "Yes" = "1")) +  
+  scale_fill_manual(values = c("#E69F00", "#56B4E9")) +    
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "none"  
+  ) +
+  geom_text(
+    stat = "count",
+    aes(label = scales::percent(..count../sum(..count..))), 
+    position = position_dodge(0.9),
+    vjust = -0.5,
+    size = 4
+  )
+```
+
+```{r}
+cols <- c("anaemia","diabetes","high_blood_pressure","sex","smoking")
+data[, cols] <- lapply(data[, cols], as.factor)
+str(data)
+
+```
+
+
+
+```{r}
+data |>
+  select_if(is.numeric) |>
+  map_df(~tibble(min = min(., na.rm = TRUE),
+                 max = max(., na.rm = TRUE),
+                 mean = round(mean(., na.rm = TRUE), 2)),
+         .id = "variable") |>
+  # a hack to make it print out all the rows
+  as.data.frame()
+```
+
+```{r}
+data %>%
+  select_if(is.numeric) %>%
+  #select_if(~n_distinct(.) > 5) %>% 
+  pivot_longer(everything(), names_to = "variable") %>%
+  ggplot() +
+  geom_histogram(aes(x = value), col = "white") +
+  facet_wrap(~variable, scales = "free", ncol = 3)
+```
+
+```{r}
+data |>
+  select_if(is.factor) |> 
+  map(table)
+```
+
+
+
+
+```{r}
+library(superheat)
+data %>%
+  select_if(is.numeric) %>%
+  #select_if(~n_distinct(.) > 4) %>% 
+  cor %>%
+  superheat(heat.pal = c("white", "#18678B", "black"),
+            heat.pal.values = c(0, 0.7, 1), 
+            pretty.order.rows = TRUE, 
+            pretty.order.cols = TRUE, 
+            grid.hline.col = "white",
+            grid.vline.col = "white", 
+            bottom.label.text.angle = 90, 
+            bottom.label.size = 0.5)
+```
+
+
+
+## model
+
+```{r}
+library(caret)
+library(randomForest)
+library(e1071)
+library(pROC)
+library(ggplot2)
+library(ROCR)
+```
+
+```{r}
+set.seed(123)
+
+# 1. processing
+sum(is.na(data))
+
+# split the data
+train_index <- createDataPartition(data$fatal_mi, p = 0.7, list = FALSE)
+train_data <- data[train_index, ]
+test_data <- data[-train_index, ]
+
+# 2. train
+# logistic
+logreg_model <- glm(fatal_mi ~ ., 
+                    data = train_data, 
+                    family = binomial)
+
+# random forest
+rf_model <- randomForest(fatal_mi ~ ., 
+                         data = train_data,
+                         ntree = 500,
+                         importance = TRUE)
+
+# svm
+svm_model <- svm(fatal_mi ~ ., 
+                 data = train_data,
+                 kernel = "radial",
+                 probability = TRUE)
+```
+
+```{r}
+library(caret)
+library(pROC)
+library(PRROC)
+# predict
+logreg_pred_prob <- predict(logreg_model, newdata = test_data, type = "response")
+logreg_pred_class <- ifelse(logreg_pred_prob > 0.5, 1, 0)
+logreg_pred_class <- factor(logreg_pred_class, levels = levels(test_data$fatal_mi))
+ 
+ 
+# accuracy
+confusion_matrix <- confusionMatrix(logreg_pred_class, test_data$fatal_mi, positive = "1")
+accuracy <- confusion_matrix$overall['Accuracy']
+cat("\n accuracy:", round(accuracy, 4))
+ 
+# AUC
+roc_obj <- roc(test_data$fatal_mi, logreg_pred_prob)
+auc_value <- auc(roc_obj)
+cat("\n AUC:", round(auc_value, 4))
+ 
+# ROC curve
+plot(roc_obj, 
+     main = "ROC Curve",
+     col = "blue",
+     legacy.axes = TRUE,
+     print.auc = TRUE)
+ 
+# PR curve
+pr_obj <- pr.curve(scores.class0 = logreg_pred_prob[test_data$fatal_mi == 0],
+                   scores.class1 = logreg_pred_prob[test_data$fatal_mi == 1],
+                   curve = TRUE)
+ 
+plot(pr_obj,
+     main = "PR Curve",
+     col = "darkred",
+     legend = FALSE)
+lines(x = c(0,1), y = c(pr_obj$baseline.precision, pr_obj$baseline.recall), lty = 2)
+
+```
+
+
+```{r}
+# predict
+rf_pred_prob <- predict(rf_model, newdata = test_data, type = "prob")[,2]
+rf_pred_class <- predict(rf_model, newdata = test_data)
+rf_pred_class <- factor(rf_pred_class, levels = levels(test_data$fatal_mi))
+ 
+
+confusion_matrix <- confusionMatrix(rf_pred_class, test_data$fatal_mi, positive = "1")
+# accuracy
+cat("\n accuracy:", round(confusion_matrix$overall['Accuracy'], 4))
+ 
+# AUC
+roc_obj <- roc(test_data$fatal_mi, rf_pred_prob)
+auc_value <- auc(roc_obj)
+cat("\n AUC:", round(auc_value, 4))
+ 
+# ROC curve
+plot(roc_obj, 
+     main = "ROC curve",
+     col = "darkgreen",
+     legacy.axes = TRUE,
+     print.auc = TRUE)
+ 
+# PRcurve
+pr_obj <- pr.curve(
+  scores.class0 = rf_pred_prob[test_data$fatal_mi == 0],
+  scores.class1 = rf_pred_prob[test_data$fatal_mi == 1],
+  curve = TRUE
+)
+ 
+plot(pr_obj,
+     main = "PR curve",
+     col = "purple",
+     legend = FALSE)
+lines(x = c(0,1), y = c(pr_obj$baseline.precision, pr_obj$baseline.recall), lty = 2)
+ 
+
+var_importance <- importance(rf_model)
+var_importance <- data.frame(
+  Variable = rownames(var_importance),
+  MeanDecreaseAccuracy = var_importance[,1],
+  MeanDecreaseGini = var_importance[,2]
+)
+#print(var_importance[order(-var_importance$MeanDecreaseAccuracy), ])
+```
+
+
+```{r}
+
+# predict
+test_pred_prob <- predict(svm_model, test_data, probability = TRUE)
+test_pred_class <- predict(svm_model, test_data)
+
+
+conf_matrix <- confusionMatrix(test_pred_class, test_data$fatal_mi, positive = "1")
+
+# accuracy
+accuracy <- conf_matrix$overall['Accuracy']
+cat("\n accuracy:", round(accuracy, 4))
+
+# AUC
+roc_obj <- roc(test_data$fatal_mi, 
+               attr(test_pred_prob, "probabilities")[,2],
+               levels = c("0", "1"),
+               direction = "<")
+auc_value <- auc(roc_obj)
+cat("\nAUC:", round(auc_value, 4))
+
+# ROC curve
+roc_plot <- ggplot(data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities),
+  aes(x = FPR, y = TPR)) +
+  geom_line(color = "darkred", size = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(title = paste("ROC curve (AUC =", round(auc_value, 3), ")")
+       ) +
+  annotate("text", x = 0.7, y = 0.3, 
+           label = paste("AUC =", round(auc_value, 3))) +
+  theme_minimal()
+
+print(roc_plot)
+```
+
+## random forest
+
+```{r}
+library(randomForest)
+
+levels(train_data$fatal_mi) <- c("no", "yes")
+levels(test_data$fatal_mi) <- c("no", "yes")
+
+# 5 cv
+ctrl <- trainControl(method = "cv",
+                     number = 5,
+                     savePredictions = TRUE,
+                     classProbs = TRUE,
+                     summaryFunction = twoClassSummary)  
+
+# （mtry）
+tuneGrid <- expand.grid(.mtry = c(2, 4, 6, 8, 10, sqrt(ncol(train_data)-1)))
+
+
+set.seed(123) 
+rf_tune <- train(fatal_mi ~ .,
+                 data = train_data,
+                 method = "rf",
+                 trControl = ctrl,
+                 tuneGrid = tuneGrid,
+                 ntree = 500,
+                 importance = TRUE,
+                 metric = "ROC")  
+
+# best parameters
+print(rf_tune)
+plot(rf_tune)
+```
+
+```{r}
+# test
+test_pred <- predict(rf_tune, newdata = test_data, type = "prob")
+test_class <- predict(rf_tune, newdata = test_data)
+
+
+# AUC
+library(pROC)
+roc_obj <- roc(test_data$fatal_mi, test_pred[,2])
+auc_value <- auc(roc_obj)
+cat("AUC:", round(auc_value, 3))
+
+# ROC curve
+plot(roc_obj, 
+     main = paste("ROC Curve (AUC =", round(auc_value, 3), ")"),
+     print.auc = TRUE)
+```
+
+```{r}
+test_pred <- predict(rf_tune, newdata = test_data, type = "prob")
+test_class <- predict(rf_tune, newdata = test_data)
+
+cm <- confusionMatrix(test_class, 
+                      test_data$fatal_mi, 
+                      positive = "yes")  
+
+# index
+recall <- cm$byClass["Sensitivity"]    # （Sensitivity）
+precision <- cm$byClass["Precision"]   # （Precision）
+f1_score <- cm$byClass["F1"]           # F1 score
+library(pROC)
+roc_obj <- roc(test_data$fatal_mi, test_pred[,2])
+auc_value <- auc(roc_obj)
+
+metrics_df <- data.frame(
+  Metric = c("Accuracy", "Recall", "Precision", "F1 Score", "AUC"),
+  Value = round(c(cm$overall["Accuracy"], recall, precision, f1_score, auc_value), 3)
+)
+print(metrics_df)
+```
+
